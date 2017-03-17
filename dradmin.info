@@ -1,0 +1,6 @@
+name = Drupal Radmin
+description = Module for managing OpenSimulator sims using Radmin
+package = OpenSimulator Manager
+dependencies[] = number
+dependencies[] = entityreference
+core = 7.x

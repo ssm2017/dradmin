@@ -1,0 +1,351 @@
+<?php
+
+/**
+ * Implements hook_help().
+ */
+function dradmin_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#dradmin':
+      return t('DRadmin is a drupal module to control OpenSimulator sims using RAdmin.</br>
+        To make this project work, you must have [RemoteAdmin] enabled in your OpenSim.ini file.');
+  }
+}
+
+/**
+ * Check if an user is a manager
+ */
+function dradmin_is_manager($uid, $node) {
+  $is_manager = FALSE;
+  if (isset($node->field_dradmin_managers) && !empty($node->field_dradmin_managers)) {
+    foreach($node->field_dradmin_managers[$node->language] as $manager) {
+      if ($manager['target_id'] == $uid) {
+        return TRUE;
+      }
+    }
+  }
+}
+
+function dradmin_xmlrpc_call($params) {
+  $return = array();
+  $server = url('http://'. $params['url']. ':'. $params['port'], array('external' => TRUE));
+  $options = array(
+    $params['method'] => $params['params'],
+  );
+  // Make the xmlrpc request and process the results.
+  $result = xmlrpc($server, $options);
+  if (is_array($result) && !count($result)) {
+    return array(
+      'success' => FALSE,
+      'message' => t('No answer'),
+      'data' => NULL
+    );
+  }
+  if ($result === FALSE) {
+    return array(
+      'success' => FALSE,
+      'message' => t('Error: @errno, Message: @message',
+      array('@errno' => xmlrpc_errno(), '@message' => xmlrpc_error_msg())),
+      'data' => NULL
+    );
+  }
+  else {
+    return array(
+      'success' => TRUE,
+      'message' => '',
+      'data' => $result
+    );
+  }
+}
+
+/**
+ * Implements hook_node_view.
+ */
+function dradmin_node_view($node, $view_mode, $langcode) {
+  if (in_array($node->type, array('dradmin_simulator'))) {
+    // check if the server is responding
+    if (dradmin_display_sim_status($node) && dradmin_can_see_form($node)) {
+      switch($node->type) {
+        case 'dradmin_simulator':
+          $node->content['dradmin_simulator'] = dradmin_simulator_page($node);
+          break;
+      }
+    }
+    else {
+      drupal_goto();
+    }
+  }
+}
+
+function dradmin_can_see_form($node, $account=null) {
+  global $user;
+  if (dradmin_is_manager($user->uid, $node) || $user->uid == 1) {
+    return TRUE;
+  }
+  return FALSE;
+}
+
+function dradmin_display_sim_status(&$node) {
+  // check the content type
+  switch($node->type) {
+    case 'dradmin_simulator':
+      // get the machine
+      $url = $node->field_dradmin_sim_url[$node->language][0]['value'];
+      $port = $node->field_dradmin_sim_port[$node->language][0]['value'];
+      break;
+  }
+
+  $params = array(
+    'timeout' => 5
+  );
+  $response = drupal_http_request("http://". $url.":".$port. "/simstatus",$params);
+
+  if ($response->code == 200 && (isset($response->data) && $response->data == "OK")) {
+    $node->content['dradmin_server_status'] = array(
+      '#type' => 'item',
+      '#weight' => -99,
+      '#markup' => '<div class="messages status alert alert-success">'. t('The simulator is responding'). '</div>'
+    );
+    return TRUE;
+  }
+
+  drupal_set_message(t('The simulator is not responding. Error code : @error', array('@error'=>$response->code. " : ". $response->error)), 'error');
+  return FALSE;
+}
+
+function dradmin_simulator_page($node) {
+  $output = array();
+  // get params
+  $params = array(
+    'url' => $node->field_dradmin_sim_url[$node->language][0]['value'],
+    'port' => $node->field_dradmin_sim_radmin_port[$node->language][0]['value'],
+    'password' => $node->field_dradmin_sim_radmin_pass[$node->language][0]['value']
+  );
+
+  // presets
+  $output['presets'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('presets commands')
+  );
+  $sub_form = drupal_get_form('dradmin_presets_command_form', $params);
+  $output['presets']['content'] = array(
+    '#type' => 'item',
+    '#markup' => drupal_render($sub_form),
+  );
+
+  // console
+  $output['console_command'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Console command')
+  );
+  $sub_form = drupal_get_form('dradmin_console_command_form', $params);
+  $output['console_command']['content'] = array(
+    '#type' => 'item',
+    '#markup' => drupal_render($sub_form),
+  );
+
+  return $output;
+}
+
+function dradmin_presets_command_form($form, &$form_state, $params) {
+  $unique_id = drupal_html_id('radmin-presets-command-id-');
+  $form['#prefix'] = '<div id="'. $unique_id. '">';
+  $form['#suffix'] = '</div>';
+
+  // params
+  $form['params'] = array(
+    '#type' => 'value',
+    '#value' => $params
+  );
+
+  // fcache clear
+  $form['fcache_clear_button'] = array(
+    '#type'  => 'button',
+    '#name'  => 'fcache-clear-button',
+    '#value' => t('Clear simulator cache'),
+    '#ajax'  => array(
+      'callback' => 'dradmin_send_command_callback',
+      'wrapper'  => $unique_id,
+      'method'   => 'replace',
+      'effect'   => 'fade',
+    ),
+  );
+
+  // fcache assets
+  $form['fcache_assets_button'] = array(
+    '#type'  => 'button',
+    '#name'  => 'fcache-assets-button',
+    '#value' => t('Preload assets in cache'),
+    '#ajax'  => array(
+      'callback' => 'dradmin_send_command_callback',
+      'wrapper'  => $unique_id,
+      'method'   => 'replace',
+      'effect'   => 'fade',
+    ),
+  );
+
+  $form['answer'] = array(
+    '#type' => 'item',
+  );
+  return $form;
+}
+
+function dradmin_console_command_form($form, &$form_state, $params) {
+  $unique_id = drupal_html_id('radmin-console-command-id-');
+  $form['#prefix'] = '<div id="'. $unique_id. '">';
+  $form['#suffix'] = '</div>';
+
+  // params
+  $form['params'] = array(
+    '#type' => 'value',
+    '#value' => $params
+  );
+
+  // console command
+  $form['command'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Console command'),
+    '#default_value' => '',
+    '#description' => t('Send any OpenSimulator command to the simulator. example : "fcache clear" or "fcache assets" or "alert mytext"')
+  );
+  $form['button'] = array(
+    '#type'  => 'button',
+    '#name'  => 'console-command-button',
+    '#value' => t('Send command'),
+    '#ajax'  => array(
+      'callback' => 'dradmin_send_command_callback',
+      'wrapper'  => $unique_id,
+      'method'   => 'replace',
+      'effect'   => 'fade',
+    ),
+  );
+
+  $form['answer'] = array(
+    '#type' => 'item',
+  );
+  return $form;
+}
+
+function dradmin_send_command_callback($form, &$form_state) {
+  //return $form_state['clicked_button']['#name'];
+  $params = array(
+    'url' => $form_state['values']['params']['url'],
+    'port' => $form_state['values']['params']['port'],
+    'params' => array(
+      'struct' => array(
+        'password' => htmlspecialchars($form_state['values']['params']['password']),
+      )
+    )
+  );
+  switch ($form_state['clicked_button']['#name']) {
+    // console command
+    case 'console-command-button':
+      if ($form_state['values']['command'] == "") {
+        $form['answer']['#markup'] = '<div class="messages status warning">'. t('Please, enter a command to send.'). '</div>';
+        return $form;
+      }
+      $params['method'] = 'admin_console_command';
+      $params['params']['struct']['command'] = $form_state['values']['command'];
+      break;
+    // fcache clear
+    case 'fcache-clear-button':
+      $params['method'] = 'admin_console_command';
+      $params['params']['struct']['command'] = 'fcache clear';
+      break;
+    // fcache assets
+    case 'fcache-assets-button':
+      $params['method'] = 'admin_console_command';
+      $params['params']['struct']['command'] = 'fcache assets';
+      break;
+  }
+
+  // check the command before sending it to the simulator
+  $response = array();
+  if (dradmin_check_command($params['params']['struct']['command'])) {
+    $response = dradmin_xmlrpc_call($params);
+    if ($response['success']) {
+      $form['answer']['#markup'] = '<div class="messages status warning"><pre>'. print_r($response, true). '</pre></div>';
+    }
+    else {
+      if ($response['message'] == 'No answer') {
+        $form['answer']['#markup'] =  '<div class="messages status success">'. t('The command was sent.'). '</div>';
+      }
+      else {
+        $form['answer']['#markup'] =  '<div class="messages error">'. t('The system is not responding. Error code : @error', array('@error'=>$response['message'])). '</div>';
+      }
+    }
+  }
+  else {
+    $form['answer']['#markup'] =  '<div class="messages error">'. t('Wrong command'). '</div>';
+  }
+  return $form;
+}
+
+/**
+ * Check if the first word of the command is an OpenSimulator command
+ */
+function dradmin_check_command($command) {
+  $commands = array(
+    'alert',
+    'alert-user',
+    'appearance',
+    'attachments',
+    'backup',
+    'bypass',
+    'change',
+    'clear',
+    'command-script',
+    'config',
+    'create',
+    'debug',
+    'delete',
+    'delete-region',
+    'dump',
+    'edit',
+    'emergency-monitoring',
+    'estate',
+    'export-map',
+    'fcache',
+    'fix-phantoms',
+    'force',
+    'friends',
+    'generate',
+    'get',
+    'j2k',
+    'kick',
+    'land',
+    'link-mapping',
+    'link-region',
+    'load',
+    'login',
+    'monitor',
+    'physics',
+    'quit',
+    'region',
+    'remove-region',
+    'reset',
+    'restart',
+    'rotate',
+    'save',
+    'scale',
+    'scripts',
+    'set',
+    'show',
+    'shutdown',
+    'sit',
+    'stand',
+    'stats',
+    'sun',
+    'teleport',
+    'terrain',
+    'threads',
+    'translate',
+    'tree',
+    'unlink-region',
+    'wearables',
+    'wind',
+    'windlight',
+    'xengine'
+  );
+  list($firstword) = explode(' ', trim($command), 2);
+  return (in_array($firstword, $commands)) ? TRUE : FALSE;
+}
